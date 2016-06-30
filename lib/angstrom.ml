@@ -310,6 +310,355 @@ module Buffered = struct
 
 end
 
+let cons x xs = x :: xs
+
+module Z = struct
+  type 'a internal =
+    | D of 'a * int
+    | F of string list * string
+    | P of 'a t * int
+  and 'a t =
+    Input.t -> int -> more -> 'a internal
+
+  type 'a state =
+    | Partial of 'a partial
+    | Done    of 'a
+    | Fail    of string list * string
+  and 'a partial =
+    input -> more -> 'a state
+
+  let fail_to_string marks err =
+    String.concat " > " marks ^ ": " ^ err
+
+  let rec _parse p input pos more =
+    match p input pos more with
+    | D(v, _)    -> Done v
+    | F(ms, msg) -> Fail(ms, msg)
+    | P(p', pos) ->
+      let committed = Input.committed input in
+      Partial (fun input more ->
+        _parse p' (Input.create committed input) pos more)
+
+  let rec parse ?(input=`String "") p =
+    _parse p Input.(create 0 input) 0 Incomplete
+
+  let parse_only p input =
+    match _parse p Input.(create 0 input) 0 Complete with
+    | Done v        -> Result.Ok v
+    | Fail(ms, msg) -> Result.Error (fail_to_string ms msg)
+    | _             -> Result.Error "not enough input"
+
+  let return v =
+    fun input pos more -> D(v, pos)
+
+  let fail (msg:string) =
+    fun input pos more -> F([], msg)
+
+  let rec (>>=) p f =
+    fun input pos more ->
+      match p input pos more with
+      | D(a, pos') -> f a input pos' more
+      | F(ms, msg) -> F(ms, msg)
+      | P(k, pos)  -> P(k >>= f, pos)
+
+  let rec (>>|) p f =
+    fun input pos more ->
+      match p input pos more with
+      | D(a, pos') -> D(f a, pos')
+      | F(ms, msg) -> F(ms, msg)
+      | P(k, pos)  -> P(k >>| f, pos)
+
+  let rec ( *>) p1 p2 =
+    fun input pos more ->
+      match p1 input pos more with
+      | D(_, pos)  -> p2 input pos more
+      | F(ms, msg) -> F(ms, msg)
+      | P(k, pos)  -> P(k *> p2, pos)
+
+  let rec (<* ) p1 p2 =
+    fun input pos more ->
+      match p1 input pos more with
+      | D(x, pos)  ->
+        begin match p2 input pos more with
+        | D(_, pos)  -> D(x, pos)
+        | F(ms, msg) -> F(ms, msg)
+        | P(k, pos)  -> P(k >>| (fun _ -> x), pos)
+        end
+      | F(ms, msg) -> F(ms, msg)
+      | P(k, pos)  -> P(k <* p2, pos)
+
+  let rec (<?>) p mark =
+    fun input pos more ->
+      match p input pos more with
+      | D(v, pos)  -> D(v, pos)
+      | F(ms, msg) -> F(mark::ms, msg)
+      | P(k, pos)  -> P(k <?> mark, pos)
+
+  let rec (<|>) p q =
+    fun input pos more ->
+      match p input pos more with
+      | D(v, pos)  -> D(v, pos)
+      | F _        -> q input pos more
+      | P(k, pos) -> P(k <|> q, pos)
+
+  let choice ps =
+    List.fold_right (<|>) ps (fail "empty")
+
+  let commit =
+    fun input pos more ->
+      D((), pos)
+
+  let (<$>) f p = p >>| f
+  let lift  f p = p >>| f
+
+  let rec lift2 f p1 p2 =
+    fun input pos more ->
+      match p1 input pos more with
+      | D(x, pos)  ->
+        begin match p2 input pos more with
+        | D(y, pos)  -> D(f x y, pos)
+        | F(ms, msg) -> F(ms, msg)
+        | P(k, pos)  -> P(k >>| (fun y -> f x y), pos)
+        end
+      | F(ms, msg) -> F(ms, msg)
+      | P(k, pos)  -> P(lift2 f k p2, pos)
+
+  let rec lift3 f p1 p2 p3 =
+    fun input pos more ->
+      match p1 input pos more with
+      | D(x, pos)      ->
+        begin match p2 input pos more with
+        | D(y, pos)  ->
+          begin match p3 input pos more with
+          | D(z, pos)  -> D(f x y z, pos)
+          | F(ms, msg) -> F(ms, msg)
+          | P(k, pos)  -> P(lift (fun z -> f x y z) k, pos)
+          end
+        | F(ms, msg) -> F(ms, msg)
+        | P(k, pos)  -> P(lift2 (fun y z -> f x y z) k p3, pos)
+        end
+      | F(ms, msg) -> F(ms, msg)
+      | P(k, pos)  -> P(lift3 f k p2 p3, pos)
+
+  let rec lookahead ?back_to p =
+    fun input pos more ->
+      let back_to =
+        match back_to with
+        | None -> pos
+        | Some pos -> pos
+      in
+      match p input pos more with
+      | D(v, _)    -> D(v, back_to)
+      | F(ms, msg) -> F(ms, msg)
+      | P(k, pos)  -> P(lookahead ~back_to k, pos)
+
+  let _char ~msg f =
+    let rec go input pos more =
+      if pos < Input.length input then
+        match f (Input.get input pos) with
+        | None -> F([], msg)
+        | Some v -> D(v, pos + 1)
+      else if more = Incomplete then
+        F([], msg)
+      else
+        P(go, pos)
+    in
+    go
+
+  let rec peek_char =
+    fun input pos more ->
+      if pos < Input.length input then
+        D(Some (Input.get input pos), pos)
+      else if more = Incomplete then
+        P(peek_char, pos)
+      else
+        D(None, pos)
+
+  let rec peek_char_fail =
+    fun input pos more ->
+      if pos < Input.length input then
+        D(Input.get input pos, pos)
+      else if more = Incomplete then
+        P(peek_char_fail, pos)
+      else
+        F([], "peek_char_fail")
+
+  let rec peek_string n =
+    let rec go input pos more =
+      if pos + n <= Input.length input then
+        D(Input.substring input pos n, pos)
+      else if more = Incomplete then
+        P(go, pos)
+      else
+        F([], "peek_string")
+    in
+    go
+
+  let char c =
+    let msg = String.make 1 c in
+    let rec go input pos more =
+      if pos < Input.length input then
+        if c = Input.get input pos then
+          D(c, pos + 1)
+        else
+          F([], msg)
+      else if more = Incomplete then
+        P(go, pos)
+      else
+        F([], msg)
+    in
+    go
+
+  let not_char c =
+    let msg = String.make 1 c in
+    let rec go input pos more =
+      if pos < Input.length input then
+        let c' = Input.get input pos in
+        if c <> c' then
+          D(c', pos + 1)
+        else
+          F([], msg)
+      else if more = Incomplete then
+        P(go, pos)
+      else
+        F([], msg)
+    in
+    go
+
+  let any_char =
+    let rec go input pos more =
+      if pos < Input.length input then
+        D(Input.get input pos, pos + 1)
+      else if more = Incomplete then
+        P(go, pos)
+      else
+        F([], "any_char")
+    in
+    go
+
+  (* XXX(seliopou): manually inline if necessary. *)
+  let satisfy f = _char ~msg:"satisfy" (fun c -> if f c then Some c  else None)
+  let skip    f = _char ~msg:"skip"    (fun c -> if f c then Some () else None)
+
+  let string_ f s =
+    let len = String.length s in
+    let rec go input pos more =
+      if pos + len <= Input.length input then
+        let s' = Input.substring input pos len in
+        if f s = f s' then
+          D(s', pos + len)
+        else
+          F([], "string")
+      else if more = Incomplete then
+        P(go, pos)
+      else
+        F([], Printf.sprintf "%S" s)
+    in
+    go
+
+  let string    s = string_ (fun x -> x) s
+  let string_ci s = string_ String.lowercase s
+
+  let count_while msg f k =
+    let rec go acc input pos more =
+      let n = Input.count_while input pos f in
+      let acc' = n + acc in
+      if pos + acc' < Input.length input || more = Complete then
+        match k input pos acc' with
+        | None   -> F([], msg)
+        | Some v -> D(v, pos + acc')
+      else
+        P(go acc', pos)
+    in
+    go 0
+
+  let take n =
+    let rec go input pos more =
+      if pos + n <= Input.length input then
+        D(Input.substring input pos n, pos + n)
+      else if more = Complete then
+        F([], "take")
+      else
+        P(go, pos)
+    in
+    go
+
+  let take_while f =
+    count_while "take_while" f (fun input pos len ->
+      Some(Input.substring input pos len))
+
+  let take_while1 f =
+    count_while "take_while1" f (fun input pos len ->
+      if len = 0 then None else Some(Input.substring input pos len))
+
+  let skip_while f =
+    count_while "skip_while" f (fun _ _ _ -> Some ())
+
+  let take_till f =
+    take_while (fun c -> not (f c))
+
+  let rec take_rest =
+    fun input pos more ->
+      let len = Input.length input in
+      if pos < len then
+        let chunk = Input.substring input pos (len - pos) in
+        lift (fun cs -> chunk :: cs) take_rest input len more
+      else if more = Complete then
+        D([], pos)
+      else
+        P(take_rest, pos)
+
+  let rec end_of_input =
+    fun input pos more ->
+      if pos < Input.length input then
+        F([], "end_of_input")
+      else if more = Complete then
+        D((), pos)
+      else
+        P(end_of_input, pos)
+
+  let fix f =
+    let rec p = lazy (f r)
+    and r = fun input pos more ->
+      Lazy.force p input pos more
+    in
+    r
+
+  let count n p =
+    if n < 0 then
+      failwith "count: invalid argument, n < 0";
+    let rec loop = function
+      | 0 -> return []
+      | n -> lift2 cons p (loop (n - 1))
+    in
+    loop n
+
+  let many p =
+    fix (fun m ->
+      (lift2 cons p m) <|> return [])
+
+  let many1 p =
+    lift2 cons p (many p)
+
+  let many_till p t =
+    fix (fun m ->
+      (lift2 cons p m) <|> (t *> return []))
+
+  let sep_by1 s p =
+    fix (fun m ->
+      lift2 cons p ((s *> m) <|> return []))
+
+  let sep_by s p =
+    (lift2 cons p ((s *> sep_by1 s p) <|> return [])) <|> return []
+
+  let skip_many p =
+    fix (fun m ->
+      (p *> m) <|> return ())
+
+  let skip_many1 p =
+    p *> skip_many p
+end
+
 let parse_only p input =
   Unbuffered.parse_only p input
 
@@ -650,8 +999,6 @@ let fix f =
 
 let option x p =
   p <|> return x
-
-let cons x xs = x :: xs
 
 let rec list ps =
   match ps with
