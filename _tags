@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 69a7f71c2c216fe5966337f283f41f41)
+# DO NOT EDIT (digest: 67873712493e952c04dd5c868c6c9e8e)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -46,12 +46,18 @@ true: annot, bin_annot
 <lib_test/*.ml{,i,y}>: pkg_result
 <lib_test/*.ml{,i,y}>: use_angstrom
 # Executable pure_benchmark
+<benchmarks/pure_benchmark.{native,byte}>: pkg_cohttp
 <benchmarks/pure_benchmark.{native,byte}>: pkg_core_bench
 <benchmarks/pure_benchmark.{native,byte}>: pkg_cstruct
+<benchmarks/pure_benchmark.{native,byte}>: pkg_ezjsonm
 <benchmarks/pure_benchmark.{native,byte}>: pkg_result
 <benchmarks/pure_benchmark.{native,byte}>: pkg_threads
+<benchmarks/pure_benchmark.{native,byte}>: pkg_yojson
 <benchmarks/pure_benchmark.{native,byte}>: use_angstrom
+<benchmarks/*.ml{,i,y}>: pkg_cohttp
 <benchmarks/*.ml{,i,y}>: pkg_core_bench
+<benchmarks/*.ml{,i,y}>: pkg_ezjsonm
+<benchmarks/*.ml{,i,y}>: pkg_yojson
 # Executable async_benchmark
 <benchmarks/async_benchmark.{native,byte}>: pkg_async
 <benchmarks/async_benchmark.{native,byte}>: pkg_cstruct

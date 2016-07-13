@@ -77,8 +77,8 @@ module Input = struct
   let get { initial_committed; input } pos =
     let pos = pos - initial_committed in
     match input with
-    | `String s    -> String.unsafe_get s pos
-    | `Bigstring b -> Bigarray.Array1.unsafe_get b pos
+    | `String s    -> String.get s pos
+    | `Bigstring b -> Bigarray.Array1.get b pos
 
 
   let count_while { initial_committed; input } pos f =
@@ -86,9 +86,9 @@ module Input = struct
     let len = input_length input in
     begin match input with
     | `String s    ->
-      while !i < len && f (String.unsafe_get s !i) do incr i; done
+      while !i < len && f (String.get s !i) do incr i; done
     | `Bigstring b ->
-      while !i < len && f (Bigarray.Array1.unsafe_get b !i) do incr i; done
+      while !i < len && f (Bigarray.Array1.get b !i) do incr i; done
     end;
     !i - (pos - initial_committed)
 
@@ -660,6 +660,10 @@ module Z = struct
 
   let skip_many1 p =
     p *> skip_many p
+
+  let pos =
+    fun input pos more ->
+      D(pos, pos)
 end
 
 let parse_only p input =
